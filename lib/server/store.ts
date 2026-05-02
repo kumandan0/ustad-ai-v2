@@ -1,6 +1,8 @@
-import { kv } from "@vercel/kv";
+import { Redis } from "@upstash/redis";
 import { put } from "@vercel/blob";
 import path from "path";
+
+const kv = Redis.fromEnv();
 
 type Primitive = string | number | boolean | null;
 type Row = Record<string, any>;
