@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "@upstash/redis": "^1.37.0",
     "@vercel/blob": "^2.3.3",
     "@vercel/kv": "^3.0.0",
     "lucide-react": "^0.511.0",
