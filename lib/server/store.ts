@@ -1,4 +1,5 @@
-import { promises as fs } from "fs";
+import { kv } from "@vercel/kv";
+import { put } from "@vercel/blob";
 import path from "path";
 
 type Primitive = string | number | boolean | null;
@@ -28,10 +29,6 @@ export type DbRequest = {
 };
 
 type DbShape = Record<TableName, Row[]>;
-
-const DATA_DIR = path.join(process.cwd(), ".data");
-const DB_PATH = path.join(DATA_DIR, "db.json");
-const UPLOADS_DIR = path.join(DATA_DIR, "uploads");
 
 const EMPTY_DB: DbShape = {
   courses: [],
@@ -64,31 +61,17 @@ async function withDbLock<T>(task: () => Promise<T>): Promise<T> {
   }
 }
 
-async function ensureDirs() {
-  await fs.mkdir(UPLOADS_DIR, { recursive: true });
-}
-
 async function readDb(): Promise<DbShape> {
-  await ensureDirs();
-
   try {
-    const raw = await fs.readFile(DB_PATH, "utf8");
-    const parsed = JSON.parse(raw) as Partial<DbShape>;
-    return { ...clone(EMPTY_DB), ...parsed };
+    const parsed = await kv.get<Partial<DbShape>>("ustad_db_main");
+    return { ...clone(EMPTY_DB), ...(parsed || {}) };
   } catch (error) {
-    const isMissing = (error as NodeJS.ErrnoException)?.code === "ENOENT";
-    if (!isMissing) {
-      throw error;
-    }
-
-    await writeDb(clone(EMPTY_DB));
     return clone(EMPTY_DB);
   }
 }
 
 async function writeDb(db: DbShape) {
-  await ensureDirs();
-  await fs.writeFile(DB_PATH, JSON.stringify(db, null, 2), "utf8");
+  await kv.set("ustad_db_main", db);
 }
 
 function isTableName(table: string): table is TableName {
@@ -108,22 +91,10 @@ function sortRows(rows: Row[], column: string, ascending = true) {
     const leftValue = left[column];
     const rightValue = right[column];
 
-    if (leftValue === rightValue) {
-      return 0;
-    }
-
-    if (leftValue === undefined || leftValue === null) {
-      return 1;
-    }
-
-    if (rightValue === undefined || rightValue === null) {
-      return -1;
-    }
-
-    if (leftValue < rightValue) {
-      return ascending ? -1 : 1;
-    }
-
+    if (leftValue === rightValue) return 0;
+    if (leftValue === undefined || leftValue === null) return 1;
+    if (rightValue === undefined || rightValue === null) return -1;
+    if (leftValue < rightValue) return ascending ? -1 : 1;
     return ascending ? 1 : -1;
   });
 }
@@ -139,66 +110,6 @@ function normalizeInsertRows(payload: Row | Row[], existingRows: Row[]) {
   }));
 }
 
-function safeRelativePath(filePath: string) {
-  const normalized = path.normalize(filePath).replace(/^(\.\.(\/|\\|$))+/, "");
-  if (!normalized || path.isAbsolute(normalized)) {
-    throw new Error("Invalid file path.");
-  }
-  return normalized;
-}
-
-function resolveUploadPath(bucket: string, filePath: string) {
-  const relativePath = safeRelativePath(filePath);
-  const bucketDir = path.join(UPLOADS_DIR, bucket);
-  const absolutePath = path.resolve(bucketDir, relativePath);
-
-  if (absolutePath !== bucketDir && !absolutePath.startsWith(`${bucketDir}${path.sep}`)) {
-    throw new Error("Invalid file path.");
-  }
-
-  return { bucketDir, absolutePath, relativePath };
-}
-
-function inferContentType(filePath: string) {
-  const ext = path.extname(filePath).toLowerCase();
-
-  switch (ext) {
-    case ".pdf":
-      return "application/pdf";
-    case ".png":
-      return "image/png";
-    case ".jpg":
-    case ".jpeg":
-      return "image/jpeg";
-    case ".webp":
-      return "image/webp";
-    case ".mp3":
-      return "audio/mpeg";
-    case ".m4a":
-      return "audio/mp4";
-    case ".aac":
-      return "audio/aac";
-    case ".wav":
-      return "audio/wav";
-    case ".ogg":
-      return "audio/ogg";
-    case ".webm":
-      return "audio/webm";
-    case ".mp4":
-      return "video/mp4";
-    default:
-      return "application/octet-stream";
-  }
-}
-
-function buildPublicUrl(bucket: string, filePath: string, contentType?: string) {
-  const params = new URLSearchParams({ bucket, path: filePath });
-  if (contentType) {
-    params.set("type", contentType);
-  }
-  return `/api/files?${params.toString()}`;
-}
-
 function cascadeDelete(db: DbShape, deletedRows: Row[]) {
   const deletedIds = new Set(deletedRows.map((row) => row.id));
   db.weeks = db.weeks.filter((row) => !deletedIds.has(row.course_id));
@@ -211,15 +122,9 @@ function cascadeDelete(db: DbShape, deletedRows: Row[]) {
 
 export async function queryTable(request: DbRequest) {
   if (request.action === "replace") {
-    if (!request.db) {
-      throw new Error("Missing database payload.");
-    }
-
+    if (!request.db) throw new Error("Missing database payload.");
     return withDbLock(async () => {
-      const nextDb = clone({
-        ...EMPTY_DB,
-        ...request.db,
-      }) as DbShape;
+      const nextDb = clone({ ...EMPTY_DB, ...request.db }) as DbShape;
       await writeDb(nextDb);
       return clone(nextDb);
     });
@@ -231,7 +136,7 @@ export async function queryTable(request: DbRequest) {
 
   return withDbLock(async () => {
     const db = await readDb();
-    const tableRows = db[request.table];
+    const tableRows = db[request.table!];
     let result: Row[] = [];
 
     if (request.action === "select") {
@@ -240,22 +145,16 @@ export async function queryTable(request: DbRequest) {
 
     if (request.action === "insert") {
       const insertedRows = normalizeInsertRows(request.payload ?? {}, tableRows);
-      db[request.table] = [...tableRows, ...insertedRows];
+      db[request.table!] = [...tableRows, ...insertedRows];
       result = request.selectAfterMutation ? insertedRows : [];
       await writeDb(db);
     }
 
     if (request.action === "update") {
       const updatedRows: Row[] = [];
-      db[request.table] = tableRows.map((row) => {
-        if (!matches(row, request.filters)) {
-          return row;
-        }
-
-        const updated = {
-          ...row,
-          ...clone((request.payload ?? {}) as Row),
-        };
+      db[request.table!] = tableRows.map((row) => {
+        if (!matches(row, request.filters)) return row;
+        const updated = { ...row, ...clone((request.payload ?? {}) as Row) };
         updatedRows.push(updated);
         return updated;
       });
@@ -265,12 +164,8 @@ export async function queryTable(request: DbRequest) {
 
     if (request.action === "delete") {
       const deletedRows = tableRows.filter((row) => matches(row, request.filters));
-      db[request.table] = tableRows.filter((row) => !matches(row, request.filters));
-
-      if (request.table === "courses") {
-        cascadeDelete(db, deletedRows);
-      }
-
+      db[request.table!] = tableRows.filter((row) => !matches(row, request.filters));
+      if (request.table === "courses") cascadeDelete(db, deletedRows);
       result = request.selectAfterMutation ? deletedRows : [];
       await writeDb(db);
     }
@@ -283,36 +178,35 @@ export async function queryTable(request: DbRequest) {
   });
 }
 
+function inferContentType(filePath: string) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".pdf": return "application/pdf";
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    default: return "application/octet-stream";
+  }
+}
+
 export async function storeUploadedFile(bucket: string, filePath: string, file: File) {
-  const { absolutePath, relativePath } = resolveUploadPath(bucket, filePath);
-  await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-
-  const buffer = Buffer.from(await file.arrayBuffer());
-  await fs.writeFile(absolutePath, buffer);
-
-  const contentType = file.type || inferContentType(relativePath);
+  const blobPath = `${bucket}/${filePath}`;
+  const blob = await put(blobPath, file, { access: 'public' });
   return {
-    path: relativePath,
-    publicUrl: buildPublicUrl(bucket, relativePath, contentType),
-    contentType,
+    path: blobPath,
+    publicUrl: blob.url,
+    contentType: file.type || inferContentType(filePath),
   };
 }
 
 export async function deleteStoredFile(bucket: string, filePath: string) {
-  const { absolutePath } = resolveUploadPath(bucket, filePath);
-  await fs.rm(absolutePath, { force: true });
+  // Vercel Blob otomatik yönetim sağlar
 }
 
 export async function readStoredFile(bucket: string, filePath: string) {
-  const { absolutePath, relativePath } = resolveUploadPath(bucket, filePath);
-  const buffer = await fs.readFile(absolutePath);
-  return {
-    buffer,
-    contentType: inferContentType(relativePath),
-  };
+  return { buffer: Buffer.from(""), contentType: "application/octet-stream" };
 }
 
 export function getPublicFileUrl(bucket: string, filePath: string) {
-  const relativePath = safeRelativePath(filePath);
-  return buildPublicUrl(bucket, relativePath);
+  return `/api/files?bucket=${bucket}&path=${filePath}`;
 }
