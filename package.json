@@ -8,6 +8,8 @@
     "start": "next start"
   },
   "dependencies": {
+    "@vercel/blob": "^2.3.3",
+    "@vercel/kv": "^3.0.0",
     "lucide-react": "^0.511.0",
     "next": "^15.3.0",
     "react": "^19.0.0",
