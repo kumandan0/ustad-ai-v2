@@ -2,10 +2,10 @@ import { Redis } from "@upstash/redis";
 import { put } from "@vercel/blob";
 import path from "path";
 
-// Şifre isimlerini Vercel'dekiyle birebir aynı yapıyoruz
+// Vercel önbelleğini kırmak için eklendi - Deneme 1
 const kv = new Redis({
-  url: process.env.UPSTASH_KV_REST_API_URL || "",
-  token: process.env.UPSTASH_KV_REST_API_TOKEN || "",
+  url: process.env.UPSTASH_KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || "",
+  token: process.env.UPSTASH_KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || "",
 });
 
 type Primitive = string | number | boolean | null;
