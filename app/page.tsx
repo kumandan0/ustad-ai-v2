@@ -2446,20 +2446,28 @@ export default function UstadAI() {
             </button>
 
             {courseDropOpen && (
-              <div
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 6px)",
-                  left: 0,
-                  background: "#fff",
-                  border: "1px solid #e5e7eb",
-                  borderRadius: 10,
-                  boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
-                  minWidth: 260,
-                  zIndex: 100,
-                }}
-              >
-                <div style={{ padding: "8px 0" }}>
+              <>
+                {/* Menü dışına tıklamayı yakalayan görünmez katman (zIndex: 40) */}
+                <div 
+                  onClick={() => setCourseDropOpen(false)} 
+                  style={{ position: "fixed", inset: 0, zIndex: 40 }} 
+                />
+
+                {/* Açılır Menünün kendisi (zIndex: 50 ile katmanın üstünde) */}
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "calc(100% + 6px)",
+                    left: 0,
+                    background: "#fff",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 10,
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+                    minWidth: 260,
+                    zIndex: 50,
+                  }}
+                >
+                  <div style={{ padding: "8px 0" }}>
                   {courses.map((course) => (
                     <div key={course.id} style={{ display: "flex", alignItems: "center", gap: 0 }}>
                       <button
@@ -2585,10 +2593,6 @@ export default function UstadAI() {
           ))}
         </div>
       </div>
-
-      {courseDropOpen && (
-        <div onClick={() => setCourseDropOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 99 }} />
-      )}
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <div style={{ flex: 1, overflowY: "auto", background: "#f9fafb" }}>
