@@ -2405,6 +2405,15 @@ export default function UstadAI() {
           </div>
 
           <div style={{ position: "relative" }}>
+            {/* 1. Görünmez Katman: Menü açıldığında ekranı kaplar ama butonun ve menünün ALTINDA kalır */}
+            {courseDropOpen && (
+              <div
+                onClick={() => setCourseDropOpen(false)}
+                style={{ position: "fixed", inset: 0, zIndex: 40 }}
+              />
+            )}
+
+            {/* 2. Asıl "Ders Seç" Butonu */}
             <button
               onClick={() => setCourseDropOpen((open) => !open)}
               style={{
@@ -2420,6 +2429,8 @@ export default function UstadAI() {
                 fontWeight: 500,
                 color: "#374151",
                 minWidth: 180,
+                position: "relative",
+                zIndex: 45, // Görünmez katmanın (40) üstünde kalsın ki tıklanabilsin
               }}
             >
               <BookOpen size={14} color="#6b7280" />
@@ -2445,29 +2456,22 @@ export default function UstadAI() {
               />
             </button>
 
+            {/* 3. Açılır Menünün Kendisi */}
             {courseDropOpen && (
-              <>
-                {/* Menü dışına tıklamayı yakalayan görünmez katman (zIndex: 40) */}
-                <div 
-                  onClick={() => setCourseDropOpen(false)} 
-                  style={{ position: "fixed", inset: 0, zIndex: 40 }} 
-                />
-
-                {/* Açılır Menünün kendisi (zIndex: 50 ile katmanın üstünde) */}
-                <div
-                  style={{
-                    position: "absolute",
-                    top: "calc(100% + 6px)",
-                    left: 0,
-                    background: "#fff",
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 10,
-                    boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
-                    minWidth: 260,
-                    zIndex: 50,
-                  }}
-                >
-                  <div style={{ padding: "8px 0" }}>
+              <div
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 6px)",
+                  left: 0,
+                  background: "#fff",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 10,
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+                  minWidth: 260,
+                  zIndex: 50, // En üstte (50) bu olacak, böylece tıklamaları hiçbir şey engelleyemez
+                }}
+              >
+                <div style={{ padding: "8px 0" }}>
                   {courses.map((course) => (
                     <div key={course.id} style={{ display: "flex", alignItems: "center", gap: 0 }}>
                       <button
