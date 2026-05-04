@@ -964,7 +964,7 @@ export default function UstadAI() {
     setEditingGoal(null);
   };
 
-  const handleFileUpload = async (
+const handleFileUpload = async (
     weekIndex: number,
     fileType: MaterialFileType,
     event: ChangeEvent<HTMLInputElement>,
@@ -984,16 +984,23 @@ export default function UstadAI() {
     const existingMaterial = materials[weekIndex]?.[fileType];
 
     try {
+      // 1. Dosyayı Supabase'e yükle (upsert: true ile aynı isimde dosya varsa üzerine yazar)
       const { data: uploadData, error: uploadError } = await supabase.storage
         .from("law-tutor-files")
-        .upload(filePath, file);
+        .upload(filePath, file, { upsert: true });
 
-      if (uploadError || !uploadData?.publicUrl) {
-        throw uploadError ?? new Error("Dosya URL'si oluşturulamadı.");
+      if (uploadError || !uploadData) {
+        throw uploadError ?? new Error("Dosya Supabase'e yüklenemedi.");
       }
 
-      const resolvedUrl = await resolveStoredFileUrl(uploadData.publicUrl);
+      // 2. Yüklenen dosyanın herkese açık (Public) URL'sini Supabase'den talep et!
+      const { data: urlData } = supabase.storage
+        .from("law-tutor-files")
+        .getPublicUrl(filePath);
 
+      const resolvedUrl = await resolveStoredFileUrl(urlData.publicUrl);
+
+      // 3. Veritabanına (materials tablosuna) kaydet
       const { data, error } = await supabase
         .from("materials")
         .insert({
@@ -1008,9 +1015,10 @@ export default function UstadAI() {
 
       if (error || !data) {
         await deleteStoredFileUrl(resolvedUrl);
-        throw error ?? new Error("Dosya kaydedilemedi.");
+        throw error ?? new Error("Dosya veritabanına kaydedilemedi.");
       }
 
+      // 4. Eğer eski dosya varsa onu sil (Eskiyi temizle)
       if (existingMaterial?.file_url) {
         await deleteStoredFileUrl(existingMaterial.file_url);
         await supabase.from("materials").delete().eq("id", existingMaterial.id);
