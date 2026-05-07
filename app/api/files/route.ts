@@ -3,6 +3,19 @@ import { deleteStoredFile, readStoredFile, storeUploadedFile } from "@/lib/serve
 
 export const runtime = "nodejs";
 
+// Increase body size limit to 50MB for file uploads
+export const maxDuration = 60;
+
+export async function config() {
+  return {
+    api: {
+      bodyParser: {
+        sizeLimit: "50mb",
+      },
+    },
+  };
+}
+
 function parseRangeHeader(rangeHeader: string | null, size: number) {
   if (!rangeHeader) {
     return null;
