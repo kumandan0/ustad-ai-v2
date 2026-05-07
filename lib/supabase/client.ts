@@ -301,4 +301,300 @@ function buildMigrationPath(material: Row, sourceUrl: string) {
 // YENİ: VERCEL LİMİTİNİ AŞIP DOĞRUDAN SUPABASE'E YÜKLEYEN FONKSİYON
 async function uploadFile(bucket: string, filePath: string, file: Blob | File, fileName?: string) {
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_
+  const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  // Eğer Vercel'e Supabase API ayarlarını girdiysen, dosyayı doğrudan geniş otobandan yükler
+  if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+    try {
+      const response = await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${filePath}`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${SUPABASE_ANON_KEY}`,
+          "x-upsert": "true", // Aynı isimde dosya varsa hatasız üzerine yazar
+          "Content-Type": file.type || "application/octet-stream",
+        },
+        body: file,
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.message || "Supabase doğrudan yükleme hatası");
+      }
+
+      const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${filePath}`;
+      return {
+        data: { path: filePath, publicUrl },
+        error: null,
+      };
+    } catch (error) {
+      return {
+        data: null,
+        error: error instanceof Error ? error : new Error("Doğrudan yükleme başarısız."),
+      };
+    }
+  }
+
+  // YEDEK PLAN: Eğer ayarlar yoksa Vercel üzerinden denemeye devam eder (Ama hata verebilir)
+  const formData = new FormData();
+  formData.append("bucket", bucket);
+  formData.append("path", filePath);
+  formData.append("file", file, fileName ?? (file instanceof File ? file.name : "upload.bin"));
+
+  try {
+    const response = await fetch("/api/files", {
+      method: "POST",
+      body: formData,
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as {
+      data?: { path: string; publicUrl: string; contentType?: string };
+      error?: string;
+    };
+
+    if (!response.ok) {
+      return {
+        data: null,
+        error: new Error(payload.error || `Upload failed with status ${response.status}`),
+      };
+    }
+
+    return {
+      data: payload.data ?? { path: filePath, publicUrl: buildFileUrl(bucket, filePath) },
+      error: null,
+    };
+  } catch (error) {
+    return {
+      data: null,
+      error: error instanceof Error ? error : new Error("Upload failed."),
+    };
+  }
+}
+
+async function replaceServerDb(db: LegacyDbShape) {
+  return requestJson<LegacyDbShape>("/api/db", { action: "replace", db });
+}
+
+export async function migrateLegacyDataIfNeeded(): Promise<boolean> {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  if (window.localStorage.getItem(LEGACY_MIGRATION_FLAG) === "1") {
+    return false;
+  }
+
+  const legacyDb = readLegacyDbFromLocalStorage();
+  if (!legacyDb) {
+    return false;
+  }
+
+  const hasContent = Object.values(legacyDb).some((rows) => rows.length > 0);
+  if (!hasContent) {
+    window.localStorage.setItem(LEGACY_MIGRATION_FLAG, "1");
+    return false;
+  }
+
+  const nextDb = clone(legacyDb);
+  for (let index = 0; index < nextDb.materials.length; index += 1) {
+    const material = nextDb.materials[index];
+    const sourceUrl = String(material.file_url ?? "");
+    if (!sourceUrl) {
+      continue;
+    }
+
+    const blob = await readLegacyBlobFromUrl(sourceUrl);
+    if (!blob) {
+      continue;
+    }
+
+    const uploadPath = buildMigrationPath(material, sourceUrl);
+    const { data, error } = await uploadFile(
+      "law-tutor-files",
+      uploadPath,
+      blob,
+      String(material.file_name ?? `material-${material.id}`),
+    );
+
+    if (!error && data?.publicUrl) {
+      material.file_url = data.publicUrl;
+    }
+  }
+
+  const { error } = await replaceServerDb(nextDb);
+  if (error) {
+    throw error;
+  }
+
+  window.localStorage.setItem(LEGACY_MIGRATION_FLAG, "1");
+  return true;
+}
+
+function resolveLegacyObjectUrl(url: string) {
+  const cached = legacyObjectUrlCache.get(url);
+  if (cached) {
+    return cached;
+  }
+
+  return readLegacyBlobFromUrl(url).then((blob) => {
+    if (!blob) {
+      return "";
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    legacyObjectUrlCache.set(url, objectUrl);
+    return objectUrl;
+  });
+}
+
+class QueryBuilder<T extends Row | Row[] | null>
+  implements PromiseLike<{ data: T; error: Error | null }>
+{
+  private action: DbRequest["action"] = "select";
+  private filters: Filter[] = [];
+  private orderColumn: string | null = null;
+  private ascending = true;
+  private payload: Row | Row[] | null = null;
+  private selectAfterMutation = false;
+  private returnSingle = false;
+
+  constructor(private table: TableName) {}
+
+  select() {
+    this.selectAfterMutation = true;
+    return this;
+  }
+
+  insert(payload: Row | Row[]) {
+    this.action = "insert";
+    this.payload = payload;
+    return this;
+  }
+
+  update(payload: Row) {
+    this.action = "update";
+    this.payload = payload;
+    return this;
+  }
+
+  delete() {
+    this.action = "delete";
+    return this;
+  }
+
+  eq(column: string, value: Primitive) {
+    this.filters.push({ column, value });
+    return this;
+  }
+
+  order(column: string, options?: { ascending?: boolean }) {
+    this.orderColumn = column;
+    this.ascending = options?.ascending ?? true;
+    return this.execute() as DbResponse<T>;
+  }
+
+  single() {
+    this.returnSingle = true;
+    return this.execute();
+  }
+
+  then<TResult1 = { data: T; error: Error | null }, TResult2 = never>(
+    onfulfilled?:
+      | ((value: { data: T; error: Error | null }) => TResult1 | PromiseLike<TResult1>)
+      | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2> {
+    return this.execute().then(onfulfilled, onrejected);
+  }
+
+  private execute() {
+    return requestDb<T>({
+      action: this.action,
+      table: this.table,
+      filters: this.filters,
+      payload: this.payload ?? undefined,
+      orderColumn: this.orderColumn,
+      ascending: this.ascending,
+      selectAfterMutation: this.selectAfterMutation,
+      returnSingle: this.returnSingle,
+    });
+  }
+}
+
+function buildFileUrl(bucket: string, filePath: string) {
+  const params = new URLSearchParams({ bucket, path: filePath });
+  return `/api/files?${params.toString()}`;
+}
+
+export async function resolveStoredFileUrl(url: string): Promise<string> {
+  if (!url) {
+    return "";
+  }
+
+  if (url.startsWith("/api/files") || url.startsWith("http://") || url.startsWith("https://")) {
+    return url;
+  }
+
+  if (url.startsWith("idb://") || url.startsWith("data:")) {
+    return resolveLegacyObjectUrl(url);
+  }
+
+  return url;
+}
+
+export async function deleteStoredFileUrl(url: string): Promise<void> {
+  try {
+    const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+    // Supabase'den doğrudan silme işlemi
+    if (SUPABASE_URL && SUPABASE_ANON_KEY && url.startsWith(SUPABASE_URL)) {
+      const prefix = `${SUPABASE_URL}/storage/v1/object/public/`;
+      if (url.startsWith(prefix)) {
+        const pathParts = url.replace(prefix, '').split('/');
+        const bucket = pathParts[0];
+        const filePath = pathParts.slice(1).join('/');
+        await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${filePath}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
+        });
+      }
+      return;
+    }
+
+    const parsed = new URL(url, window.location.origin);
+    if (parsed.pathname !== "/api/files") {
+      return;
+    }
+
+    await fetch(parsed.toString(), { method: "DELETE" });
+  } catch {
+    // Ignore cleanup failures
+  }
+}
+
+export function createClient(): any {
+  return {
+    from(table: TableName) {
+      return {
+        select: () => new QueryBuilder(table),
+        insert: (payload: Row | Row[]) => new QueryBuilder(table).insert(payload),
+        update: (payload: Row) => new QueryBuilder(table).update(payload),
+        delete: () => new QueryBuilder(table).delete(),
+      };
+    },
+    storage: {
+      from(bucket: string) {
+        return {
+          upload: (filePath: string, file: File) => uploadFile(bucket, filePath, file),
+          getPublicUrl(filePath: string) {
+            const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+            if (SUPABASE_URL) {
+              return { data: { publicUrl: `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${filePath}` } };
+            }
+            return { data: { publicUrl: buildFileUrl(bucket, filePath) } };
+          },
+        };
+      },
+    },
+  };
+}
